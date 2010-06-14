@@ -42,7 +42,6 @@
 			<arg value="${location.timerservice.mk2.package}"/>
 		</java>
 		
-
 	</target>
 	
 	<target name="unzip-package-manager">
