@@ -21,18 +21,17 @@
  */
 package org.jboss.ejb3.timerservice.mk2;
 
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
+import org.jboss.beans.metadata.api.annotations.Inject;
+import org.jboss.ejb3.timerservice.spi.TimedObjectInvoker;
+import org.jboss.ejb3.timerservice.spi.TimerServiceFactory;
+import org.jboss.logging.Logger;
 
 import javax.ejb.TimerService;
 import javax.persistence.EntityManagerFactory;
 import javax.persistence.PersistenceUnit;
 import javax.transaction.TransactionManager;
-
-import org.jboss.beans.metadata.api.annotations.Inject;
-import org.jboss.ejb3.timerservice.spi.TimedObjectInvoker;
-import org.jboss.ejb3.timerservice.spi.TimerServiceFactory;
-import org.jboss.logging.Logger;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 
 /**
  * Implementation of {@link TimerServiceFactory}, responsible for 
@@ -72,6 +71,8 @@ public class TimerServiceFactoryImpl implements TimerServiceFactory
     */
    public TimerService createTimerService(TimedObjectInvoker invoker)
    {
+      assert emf != null : "emf is null";
+      
       // TODO: inject
       executor = Executors.newScheduledThreadPool(10);
 
