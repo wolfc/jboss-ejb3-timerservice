@@ -21,19 +21,6 @@
  */
 package org.jboss.ejb3.timerservice.mk2.test.common;
 
-import java.io.File;
-import java.io.IOException;
-import java.net.JarURLConnection;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.net.URL;
-import java.net.URLConnection;
-import java.util.Enumeration;
-import java.util.List;
-import java.util.Properties;
-
-
-
 import org.jboss.bootstrap.microcontainer.ServerImpl;
 import org.jboss.bootstrap.spi.ServerConfig;
 import org.jboss.bootstrap.spi.microcontainer.MCServer;
@@ -49,6 +36,13 @@ import org.jboss.vfs.VirtualFile;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 
+import java.io.File;
+import java.io.IOException;
+import java.net.*;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.Properties;
+
 /**
  * @author <a href="mailto:cdewolf@redhat.com">Carlo de Wolf</a>
  * @version $Revision: $
@@ -59,11 +53,13 @@ public abstract class AbstractTimerTestCase
    
    private static MCServer server;
    private static MainDeployer mainDeployer;
-   
+
+   private static final String MODULE_DIR = "timerservice-mk2";
+
    /**
     * basedir (set through Maven)
     */
-   protected static final File BASEDIR = new File(System.getProperty("basedir"));
+   protected static final File BASEDIR = new File(System.getProperty("basedir", MODULE_DIR));
 
    /**
     * Target directory
@@ -93,7 +89,7 @@ public abstract class AbstractTimerTestCase
       mkdir("target/bootstrap/server/default/tmp/native");
       log.info("dir = " + dir);
       props.put(ServerConfig.HOME_DIR, dir);
-      props.put(ServerConfig.SERVER_CONFIG_URL, findDir("src/test/resources/conf"));
+      props.put(ServerConfig.SERVER_CONFIG_URL, findDir(BASEDIR, "/src/test/resources/conf"));
       
       // see https://jira.jboss.org/jira/browse/JBBOOT-20
       props.put(ServerConfig.EXIT_ON_SHUTDOWN, "false");
@@ -118,11 +114,12 @@ public abstract class AbstractTimerTestCase
             continue;
          JarURLConnection connection = (JarURLConnection) c;
          URL jarFileURL = connection.getJarFileURL();
+         log.info("Deploy " + jarFileURL);
          addToDeploy(jarFileURL);
       }
       
       // TODO: another hack that simulates profile service going through deploy dir
-      VirtualFile deployDir = VFS.getChild(findDirURI("src/test/resources/deploy"));
+      VirtualFile deployDir = VFS.getChild(findDirURI(BASEDIR, "src/test/resources/deploy"));
       List<VirtualFile> candidates = deployDir.getChildren();
       for(VirtualFile candidate : candidates)
       {
@@ -170,14 +167,14 @@ public abstract class AbstractTimerTestCase
       mainDeployer.addDeployment(deployment);
    }
    
-   private static String findDir(String path) throws IOException
+   private static String findDir(File basedir, String path) throws IOException
    {
-      return findDirURI(path).toString();
+      return findDirURI(basedir, path).toString();
    }
    
-   private static URI findDirURI(String path) throws IOException
+   private static URI findDirURI(File basedir, String path) throws IOException
    {
-      File file = new File(path);
+      File file = new File(basedir, path);
       boolean success = file.isDirectory();
       if(!success)
          throw new IOException("failed to find " + path);
