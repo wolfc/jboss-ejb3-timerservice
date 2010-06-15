@@ -21,24 +21,19 @@
  */
 package org.jboss.ejb3.timerservice.mk2;
 
-import java.io.Serializable;
-import java.util.Date;
-import java.util.UUID;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
-
-import javax.ejb.EJBException;
-import javax.ejb.NoMoreTimeoutsException;
-import javax.ejb.NoSuchObjectLocalException;
-import javax.ejb.ScheduleExpression;
-import javax.ejb.TimerHandle;
-
 import org.jboss.ejb3.timerservice.extension.Timer;
 import org.jboss.ejb3.timerservice.extension.TimerService;
 import org.jboss.ejb3.timerservice.mk2.persistence.TimerEntity;
 import org.jboss.ejb3.timerservice.mk2.task.TimerTask;
 import org.jboss.ejb3.timerservice.spi.TimedObjectInvoker;
 import org.jboss.logging.Logger;
+
+import javax.ejb.*;
+import java.io.Serializable;
+import java.util.Date;
+import java.util.UUID;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Implementation of EJB3.1 {@link Timer}
@@ -323,7 +318,11 @@ public class TimerImpl implements Timer
          setTimerState(TimerState.CANCELED);
       }
       // cancel any scheduled timer task
-      future.cancel(false);
+      if (future != null)
+      {
+         future.cancel(false);
+         future = null;
+      }
 
       // persist changes
       timerService.persistTimer(this);
