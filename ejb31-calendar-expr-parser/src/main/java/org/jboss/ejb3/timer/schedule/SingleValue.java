@@ -43,7 +43,7 @@ public class SingleValue
     */
    public SingleValue(String val)
    {
-      this.value = val;
+      this.value = val.trim();
    }
    
    public String getValue()

@@ -262,15 +262,16 @@ public class DayOfMonth extends MixedValueTypeExpression
 
       return next;
    }
-   
-   public int getFirst()
-   {
-      if (this.expressionType == ScheduleExpressionType.WILDCARD)
-      {
-         return new GregorianCalendar().get(Calendar.DAY_OF_MONTH);
-      }
-      return this.daysOfMonth.first();
-   }
+ 
 
+   @Override
+   protected void assertValid(Integer value) throws IllegalArgumentException
+   {
+      if (value != null && value == 0)
+      {
+         throw new IllegalArgumentException("Invalid value for day-of-month: " + value);
+      }
+      super.assertValid(value);
+   }
 
 }

@@ -21,19 +21,32 @@
  */
 package org.jboss.ejb3.timerservice.mk2;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.ObjectInputStream;
+import java.io.ObjectStreamClass;
+import java.io.Serializable;
+import java.util.Date;
+import java.util.UUID;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+
+import javax.ejb.EJBException;
+import javax.ejb.NoMoreTimeoutsException;
+import javax.ejb.NoSuchObjectLocalException;
+import javax.ejb.ScheduleExpression;
+import javax.ejb.TimerHandle;
+import javax.transaction.Status;
+import javax.transaction.Synchronization;
+import javax.transaction.Transaction;
+
 import org.jboss.ejb3.timerservice.extension.Timer;
 import org.jboss.ejb3.timerservice.extension.TimerService;
 import org.jboss.ejb3.timerservice.mk2.persistence.TimerEntity;
 import org.jboss.ejb3.timerservice.mk2.task.TimerTask;
 import org.jboss.ejb3.timerservice.spi.TimedObjectInvoker;
 import org.jboss.logging.Logger;
-
-import javax.ejb.*;
-import java.io.Serializable;
-import java.util.Date;
-import java.util.UUID;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Implementation of EJB3.1 {@link Timer}
@@ -149,7 +162,6 @@ public class TimerImpl implements Timer
 
       this.id = id;
       this.timerService = service;
-      this.timerService.addTimer(this);
 
       this.timedObjectInvoker = service.getInvoker();
       this.info = info;
@@ -163,7 +175,7 @@ public class TimerImpl implements Timer
       this.handle = new TimerHandleImpl(this.id, this.timedObjectInvoker.getTimedObjectId(), service);
 
       setTimerState(TimerState.CREATED);
-      
+
    }
 
    /**
@@ -175,8 +187,9 @@ public class TimerImpl implements Timer
    public TimerImpl(TimerEntity persistedTimer, TimerServiceImpl service)
    {
       this(persistedTimer.getId(), service, persistedTimer.getInitialDate(), persistedTimer.getInterval(),
-            persistedTimer.getNextDate(), persistedTimer.getInfo(), true);
+            persistedTimer.getNextDate(), null, true);
       this.previousRun = persistedTimer.getPreviousRun();
+      this.info = this.deserialize(persistedTimer.getInfo());
    }
 
    /**
@@ -208,14 +221,52 @@ public class TimerImpl implements Timer
    {
       // first check whether the timer has expired or has been cancelled
       this.assertTimerState();
-      this.cancelTimer();
+      if (timerState != TimerState.EXPIRED)
+      {
+         setTimerState(TimerState.CANCELED);
+      }
+      // if in tx, register with tx so cancel on tx completion
+      Transaction currentTx = this.timerService.getTransaction();
+      if (currentTx == null)
+      {
+         this.cancelTimer();
+      }
+      else
+      {
+         this.registerTimerCancellationWithTx(currentTx);
+      }
+      
+      // persist changes
+      timerService.persistTimer(this);
    }
 
    /**
     * {@inheritDoc}
+    * @see #getTimerHandle()
     */
    @Override
    public TimerHandle getHandle() throws IllegalStateException, NoSuchObjectLocalException, EJBException
+   {
+      // make sure it's in correct state
+      this.assertTimerState();
+      
+      // for non-persistent timers throws an exception (mandated by EJB3 spec)
+      if (this.persistent == false)
+      {
+         throw new IllegalStateException("EJB3.1 Spec 18.2.6 Timer handles are only available for persistent timers.");
+      }
+      return this.handle;
+   }
+   
+   /**
+    * This method returns the {@link TimerHandle} corresponding to this {@link TimerImpl}. 
+    * Unlike the {@link #getHandle()} method, this method does <i>not</i> throw an {@link IllegalStateException}
+    * or {@link NoSuchObjectLocalException} or {@link EJBException}, for non-persistent timers. 
+    * Instead this method returns the {@link TimerHandle} corresponding to that non-persistent
+    * timer (remember that {@link TimerImpl} creates {@link TimerHandle} for both persistent and non-persistent timers) 
+    * @return
+    */
+   public TimerHandle getTimerHandle()
    {
       return this.handle;
    }
@@ -226,20 +277,39 @@ public class TimerImpl implements Timer
    @Override
    public boolean isPersistent() throws IllegalStateException, NoSuchObjectLocalException, EJBException
    {
+      // make sure the call is allowed in the current timer state
+      this.assertTimerState();
+      
       return this.persistent;
    }
 
    /**
     * {@inheritDoc}
+    * @see #getTimerInfo()
     */
    @Override
    public Serializable getInfo() throws IllegalStateException, NoSuchObjectLocalException, EJBException
    {
+      // make sure this call is allowed
+      this.assertTimerState();
+      
       return this.info;
    }
 
    /**
+    * This method is similar to {@link #getInfo()}, except that this method does <i>not</i> check the timer state
+    * and hence does <i>not</i> throw either {@link IllegalStateException} or {@link NoSuchObjectLocalException} 
+    * or {@link EJBException}.
+    * @return
+    */
+   public Serializable getTimerInfo()
+   {
+      return this.info;
+   }
+   
+   /**
     * {@inheritDoc}
+    * @see #getNextExpiration()
     */
    @Override
    public Date getNextTimeout() throws IllegalStateException, NoSuchObjectLocalException, EJBException
@@ -249,6 +319,17 @@ public class TimerImpl implements Timer
       return this.nextExpiration;
    }
 
+   /**
+    * This method is similar to {@link #getNextTimeout()}, except that this method does <i>not</i> check the timer state
+    * and hence does <i>not</i> throw either {@link IllegalStateException} or {@link NoSuchObjectLocalException} 
+    * or {@link EJBException}. 
+    * @return
+    */
+   public Date getNextExpiration()
+   {
+      return this.nextExpiration;
+   }
+   
    /**
     * Sets the next timeout of this timer
     * @param next The next scheduled timeout of this timer
@@ -303,7 +384,7 @@ public class TimerImpl implements Timer
    {
       return false;
    }
-   
+
    /**
     * Cancels any scheduled timer task and appropriately updates the state of this timer
     * to {@link TimerState#CANCELED}
@@ -313,19 +394,12 @@ public class TimerImpl implements Timer
     */
    protected void cancelTimer()
    {
-      if (timerState != TimerState.EXPIRED)
-      {
-         setTimerState(TimerState.CANCELED);
-      }
       // cancel any scheduled timer task
-      if (future != null)
+      if (this.future != null)
       {
          future.cancel(false);
-         future = null;
       }
 
-      // persist changes
-      timerService.persistTimer(this);
    }
 
    /**
@@ -383,14 +457,13 @@ public class TimerImpl implements Timer
    }
 
    /**
-    * Returns true if this timer is either in {@link TimerState#CANCELED_IN_TX} or in
-    * {@link TimerState#CANCELED} state. Else returns false.
+    * Returns true if this timer is in {@link TimerState#CANCELED} state. Else returns false.
     * 
     * @return
     */
    public boolean isCanceled()
    {
-      return timerState == TimerState.CANCELED_IN_TX || timerState == TimerState.CANCELED;
+      return timerState == TimerState.CANCELED;
    }
 
    /**
@@ -443,7 +516,6 @@ public class TimerImpl implements Timer
     * Asserts that the timer is <i>not</i> in any of the following states:
     * <ul>
     *   <li>{@link TimerState#CANCELED}</li>
-    *   <li>{@link TimerState#CANCELED_IN_TX}</li>
     *   <li>{@link TimerState#EXPIRED}</li>
     * </ul>
     * @throws NoSuchObjectLocalException if the txtimer was canceled or has expired
@@ -452,7 +524,7 @@ public class TimerImpl implements Timer
    {
       if (timerState == TimerState.EXPIRED)
          throw new NoSuchObjectLocalException("Timer has expired");
-      if (timerState == TimerState.CANCELED_IN_TX || timerState == TimerState.CANCELED)
+      if (timerState == TimerState.CANCELED)
          throw new NoSuchObjectLocalException("Timer was canceled");
    }
 
@@ -468,7 +540,10 @@ public class TimerImpl implements Timer
       // remove from timerservice
       timerService.removeTimer(this);
       // Cancel any scheduled timer task
-      future.cancel(false);
+      if (this.future != null)
+      {
+         future.cancel(false);
+      }
 
       // persist changes
       timerService.persistTimer(this);
@@ -523,12 +598,17 @@ public class TimerImpl implements Timer
          this.future.cancel(false);
       }
    }
-   
+
    /**
     * Creates and schedules a {@link TimerTask} for the next timeout of this timer
     */
    public void scheduleTimeout()
    {
+      if (this.nextExpiration == null)
+      {
+         logger.info("Next expiration is null. No tasks will be scheduled");
+         return;
+      }
       // create the timer task
       Runnable timerTask = this.getTimerTask();
       // find out how long is it away from now
@@ -572,6 +652,35 @@ public class TimerImpl implements Timer
    protected TimerTask<?> getTimerTask()
    {
       return new TimerTask<TimerImpl>(this);
+   }
+
+   /**
+    * A {@link javax.ejb.Timer} is equal to another {@link javax.ejb.Timer} if their
+    * {@link TimerHandle}s are equal
+    */
+   @Override
+   public boolean equals(Object obj)
+   {
+      if (obj == null)
+      {
+         return false;
+      }
+      if (this.handle == null)
+      {
+         return false;
+      }
+      if (obj instanceof TimerImpl == false)
+      {
+         return false;
+      }
+      TimerImpl otherTimer = (TimerImpl) obj;
+      return this.handle.equals(otherTimer.getTimerHandle());
+   }
+   
+   @Override
+   public int hashCode()
+   {
+      return this.handle.hashCode();
    }
    
    /**
@@ -620,4 +729,134 @@ public class TimerImpl implements Timer
       return sb.toString();
    }
 
+   private void registerTimerCancellationWithTx(Transaction tx)
+   {
+      try
+      {
+         tx.registerSynchronization(new TimerCancellationTransactionSynchronization(this));
+      }
+      catch (Exception e)
+      {
+         throw new RuntimeException("Could not register with tx for timer cancellation: " , e);
+      }
+   }
+   
+   private Serializable deserialize(byte[] bytes)
+   {
+      if (bytes == null)
+      {
+         return null;
+      }
+      try
+      {
+         ByteArrayInputStream bais = new ByteArrayInputStream(bytes);
+         ObjectInputStream ois = new ObjectInputStreamWithTCCL(bais);
+         return (Serializable) ois.readObject();
+      }
+      catch (IOException ioe)
+      {
+         throw new RuntimeException("Could not deserialize info in timer", ioe);
+      }
+      catch (ClassNotFoundException cnfe)
+      {
+         throw new RuntimeException("Could not deserialize info in timer", cnfe);
+      }
+   }
+
+   /**
+    * {@link ObjectInputStreamWithTCCL} during {@link #resolveClass(ObjectStreamClass)}
+    * first tries to resolve the class in the thread context classloader
+    * {@link Thread#getContextClassLoader()}. If it cannot resolve in the current context
+    * loader, it passes on the control to {@link ObjectInputStream} to resolve the class
+    */
+   private static final class ObjectInputStreamWithTCCL extends ObjectInputStream
+   {
+
+      public ObjectInputStreamWithTCCL(InputStream in) throws IOException
+      {
+         super(in);
+      }
+
+      protected Class<?> resolveClass(ObjectStreamClass v) throws IOException, ClassNotFoundException
+      {
+         String className = v.getName();
+         Class<?> resolvedClass = null;
+
+         logger.trace("Attempting to locate class [" + className + "]");
+
+         ClassLoader tccl = Thread.currentThread().getContextClassLoader();
+         try
+         {
+            resolvedClass = tccl.loadClass(className);
+            logger.trace("Class resolved through context class loader");
+         }
+         catch (ClassNotFoundException e)
+         {
+            logger.trace("Asking super to resolve");
+            resolvedClass = super.resolveClass(v);
+         }
+
+         return resolvedClass;
+      }
+   }
+
+   private class TimerCancellationTransactionSynchronization implements Synchronization
+   {
+
+      /**
+       * The timer being managed in the transaction
+       */
+      private TimerImpl timer;
+
+      public TimerCancellationTransactionSynchronization(TimerImpl timer)
+      {
+         if (timer == null)
+         {
+            throw new IllegalStateException("Timer cannot be null");
+         }
+         this.timer = timer;
+      } 
+      
+      @Override
+      public void afterCompletion(int status)
+      {
+         if (status == Status.STATUS_COMMITTED)
+         {
+            logger.debug("commit timer cancellation: " + this.timer);
+
+            TimerState timerState = this.timer.getState();
+            switch (timerState)
+            {
+               case CANCELED :
+               case IN_TIMEOUT:
+               case RETRY_TIMEOUT:
+                  this.timer.cancelTimer();
+                  break;
+
+            }
+         }
+         else if (status == Status.STATUS_ROLLEDBACK)
+         {
+            logger.debug("rollback timer cancellation: " + this.timer);
+
+            TimerState timerState = this.timer.getState();
+            switch (timerState)
+            {
+               case CANCELED :
+                  this.timer.setTimerState(TimerState.ACTIVE);
+                  break;
+
+            }
+            
+         }
+      }
+
+      @Override
+      public void beforeCompletion()
+      {
+         // TODO Auto-generated method stub
+         
+      }
+      
+   }
 }

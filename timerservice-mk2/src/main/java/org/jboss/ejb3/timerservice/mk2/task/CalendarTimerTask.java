@@ -21,7 +21,12 @@
  */
 package org.jboss.ejb3.timerservice.mk2.task;
 
+import java.util.Calendar;
+import java.util.Date;
+import java.util.GregorianCalendar;
+
 import org.jboss.ejb3.timerservice.mk2.CalendarTimer;
+import org.jboss.ejb3.timerservice.mk2.TimerState;
 import org.jboss.ejb3.timerservice.spi.TimedObjectInvoker;
 import org.jboss.logging.Logger;
 import org.jboss.ejb3.timerservice.spi.MultiTimeoutMethodTimedObjectInvoker;
@@ -50,11 +55,16 @@ public class CalendarTimerTask extends TimerTask<CalendarTimer>
    }
 
    @Override
-   protected void handleTimeout() throws Exception
+   protected void callTimeout() throws Exception
    {
       CalendarTimer calendarTimer = this.getTimer();
 
-      calendarTimer.scheduleTimeout();
+      // if we have any more schedules remaining, then schedule a new task
+      if (calendarTimer.getNextExpiration() != null && calendarTimer.isInRetry() == false)
+      {
+         calendarTimer.scheduleTimeout();
+      }
+
       // finally invoke the timeout method through the invoker
       if (calendarTimer.isAutoTimer())
       {
@@ -67,12 +77,52 @@ public class CalendarTimerTask extends TimerTask<CalendarTimer>
             throw new RuntimeException(msg);
          }
          // call the timeout method
-         ((MultiTimeoutMethodTimedObjectInvoker) invoker).callTimeout(calendarTimer, calendarTimer.getTimeoutMethod(), calendarTimer
-               .getTimeoutMethodParams());
+         ((MultiTimeoutMethodTimedObjectInvoker) invoker).callTimeout(calendarTimer, calendarTimer.getTimeoutMethod());
       }
       else
       {
          this.timerService.getInvoker().callTimeout(calendarTimer);
+      }
+   }
+
+   @Override
+   protected Date calculateNextTimeout()
+   {
+      // The next timeout for the calendar timer will have to be computed using the
+      // current "nextExpiration"
+      Date currentTimeout = this.getTimer().getNextExpiration();
+      if (currentTimeout == null)
+      {
+         return null;
+      }
+      Calendar cal = new GregorianCalendar();
+      cal.setTime(currentTimeout);
+      // now compute the next timeout date
+      Calendar nextTimeout = this.getTimer().getCalendarTimeout().getNextTimeout(cal);
+      if (nextTimeout != null)
+      {
+         return nextTimeout.getTime();
+      }
+      return null;
+   }
+
+   @Override
+   protected void postTimeoutProcessing()
+   {
+      CalendarTimer calendarTimer = this.getTimer();
+      TimerState timerState = calendarTimer.getState();
+      if (timerState == TimerState.IN_TIMEOUT || timerState == TimerState.RETRY_TIMEOUT)
+      {
+         if (calendarTimer.getNextExpiration() == null)
+         {
+            calendarTimer.expireTimer();
+         }
+         else
+         {
+            calendarTimer.setTimerState(TimerState.ACTIVE);
+            // persist changes
+            timerService.persistTimer(calendarTimer);
+         }
       }
    }
 

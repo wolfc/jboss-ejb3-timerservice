@@ -21,13 +21,10 @@
  */
 package org.jboss.ejb3.timerservice.mk2.task;
 
-import java.util.Calendar;
 import java.util.Date;
-import java.util.GregorianCalendar;
 
 import javax.ejb.Timer;
 
-import org.jboss.ejb3.timerservice.mk2.CalendarTimer;
 import org.jboss.ejb3.timerservice.mk2.TimerImpl;
 import org.jboss.ejb3.timerservice.mk2.TimerServiceImpl;
 import org.jboss.ejb3.timerservice.mk2.TimerState;
@@ -99,86 +96,112 @@ public class TimerTask<T extends TimerImpl> implements Runnable
    @Override
    public void run()
    {
-      logger.debug("run: " + this.timer);
-      // set the current date as the "previous run" of the timer. 
-      this.timer.setPreviousRun(new Date());
-      long intervalDuration = this.timer.getInterval();
-      if (this.timer.isActive())
-      {
-         // if it's a calendar timer or a timer for repeated intervals,
-         // then compute the next timeout date
-         if (this.timer.isCalendarTimer())
-         {
-            Date nextExpiration = this.timer.getNextTimeout();
-            Calendar cal = new GregorianCalendar();
-            cal.setTime(nextExpiration);
-            // compute the next timeout date
-            Calendar nextTimeout = ((CalendarTimer) this.timer).getCalendarTimeout().getNextTimeout(cal);
-            this.timer.setNextTimeout(nextTimeout.getTime());
-         }
-         else if (intervalDuration > 0)
-         {
-            Date nextExpiration = this.timer.getNextTimeout();
-            // compute the next timeout date
-            nextExpiration = new Date(nextExpiration.getTime() + intervalDuration);
-            this.timer.setNextTimeout(nextExpiration);
-         }
-      }
-      // persist changes
-      this.timerService.persistTimer(this.timer);
+      Date now = new Date();
+      logger.debug("Timer task invoked at: " + now + " for timer " + this.timer);
 
       // If a retry thread is in progress, we don't want to allow another
       // interval to execute until the retry is complete. See JIRA-1926.
       if (this.timer.isInRetry())
       {
-         logger.debug("Timer in retry mode, skipping this scheduled execution");
+         logger.debug("Timer in retry mode, skipping this scheduled execution at: " + now);
          return;
       }
 
-      if (this.timer.isActive())
+      if (this.timer.isActive() == false)
       {
+         logger.debug("Timer is not active, skipping this scheduled execution at: " + now);
+      }
+      // set the current date as the "previous run" of the timer. 
+      this.timer.setPreviousRun(new Date());
+      Date nextTimeout = this.calculateNextTimeout();
+      this.timer.setNextTimeout(nextTimeout);
+      // change the state to mark it as in timeout method
+      this.timer.setTimerState(TimerState.IN_TIMEOUT);
+
+      // persist changes
+      this.timerService.persistTimer(this.timer);
+
+      try
+      {
+         // invoke timeout
+         this.callTimeout();
+      }
+      catch (Exception e)
+      {
+         logger.error("Error invoking timeout for timer: " + this.timer, e);
          try
          {
-            // change the state to mark it as in timeout method
-            this.timer.setTimerState(TimerState.IN_TIMEOUT);
-            // persist changes
-            this.timerService.persistTimer(this.timer);
-            // invoke timeout
-            this.handleTimeout();
+            logger.info("Timer: " + this.timer + " will be retried");
+            retryTimeout();
          }
-         catch (Exception e)
+         catch (Exception retryException)
          {
-            logger.error("Error invoking ejbTimeout", e);
+            // that's it, we can't do anything more. Let's just log the exception
+            // and return
+            logger.error("Error during retyring timeout for timer: " + timer, e);
          }
-         finally
-         {
-            TimerState timerState = this.timer.getState();
-            if (timerState == TimerState.IN_TIMEOUT)
-            {
-               // if it's not a calendar timer and it's not scheduled at
-               // repeated intervals, then expire the timer. 
-               if (intervalDuration == 0 && this.timer.isCalendarTimer() == false)
-               {
-                  this.timer.expireTimer();
-               }
-               else
-               {
-                  this.timer.setTimerState(TimerState.ACTIVE);
-                  // persist changes
-                  timerService.persistTimer(this.timer);
-               }
-            }
-         }
+      }
+      finally
+      {
+         this.postTimeoutProcessing();
       }
    }
 
-   protected void handleTimeout() throws Exception
+   protected void callTimeout() throws Exception
    {
       this.timerService.getInvoker().callTimeout(this.timer);
+   }
+
+   protected Date calculateNextTimeout()
+   {
+      long intervalDuration = this.timer.getInterval();
+      if (intervalDuration > 0)
+      {
+         Date nextExpiration = this.timer.getNextExpiration();
+         // compute the next timeout date
+         nextExpiration = new Date(nextExpiration.getTime() + intervalDuration);
+         return nextExpiration;
+      }
+      return null;
+
    }
 
    protected T getTimer()
    {
       return this.timer;
+   }
+
+   protected void retryTimeout() throws Exception
+   {
+      if (this.timer.isActive())
+      {
+         logger.info("Retrying timeout for timer: " + this.timer);
+         this.timer.setTimerState(TimerState.RETRY_TIMEOUT);
+         this.timerService.persistTimer(this.timer);
+         
+         this.callTimeout();
+      }
+      else
+      {
+         logger.info("Timer is not active, skipping retry of timer: " + this.timer);
+      }
+   }
+
+   protected void postTimeoutProcessing()
+   {
+      TimerState timerState = this.timer.getState();
+      if (timerState == TimerState.IN_TIMEOUT || timerState == TimerState.RETRY_TIMEOUT)
+      {
+         if (this.timer.getInterval() == 0)
+         {
+            this.timer.expireTimer();
+         }
+         else
+         {
+            this.timer.setTimerState(TimerState.ACTIVE);
+            // persist changes
+            timerService.persistTimer(this.timer);
+         }
+      }
    }
 }

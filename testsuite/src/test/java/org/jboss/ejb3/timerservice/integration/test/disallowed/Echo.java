@@ -19,18 +19,16 @@
  * Software Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
  * 02110-1301 USA, or see the FSF site: http://www.fsf.org.
  */
-package org.jboss.ejb3.timerservice.extension;
+package org.jboss.ejb3.timerservice.integration.test.disallowed;
 
 /**
- * Timer
+ * Useless
  *
  * @author Jaikiran Pai
  * @version $Revision: $
  */
-public interface Timer extends javax.ejb.Timer
+public interface Echo
 {
 
-   boolean isAutoTimer();
-   
-   boolean isActive();
+   String echo(String msg);
 }
